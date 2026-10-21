@@ -536,6 +536,13 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     return host_block_manager_.get();
   }
 
+  // Allocates and locks `num_blocks` physical host blocks from the internal
+  // LogicalBlockManager.
+  absl::StatusOr<std::vector<int>> AllocateHostBlocks(int num_blocks);
+
+  // Deallocates `block_ids` back to the free pool in LogicalBlockManager.
+  absl::Status DeallocateHostBlocks(absl::Span<const int> block_ids);
+
   // BlockTransport's wire index addresses pools after explicit admission and
   // constructor storages otherwise.
   size_t num_block_arrays() const override;
@@ -738,6 +745,29 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> host_layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
+
+  // Bulk D2H from a pre-packed device buffer (one handle per shard) whose
+  // on-device layout packs all `num_layers_` layers per block in block-major
+  // order `[0..total_blocks)[0..num_layers_)` (may be over-provisioned along
+  // axis 0 for static bucketing). Issues one bulk DMA per shard (or bounded
+  // bounce chunk) and scatters into each layer's host DRAM buffer at
+  // `dst_offsets_major_dim`.
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hFromPackedDeviceBuffer(
+      absl::Span<const raiden::RaidenBufferHandle> packed_shards,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      std::optional<int64_t> slot_idx = std::nullopt);
+
+  // Symmetrical bulk H2D into a pre-packed device buffer (one handle per shard)
+  // laid out in block-major order `[0..total_blocks)[0..num_layers_)` (may be
+  // over-provisioned along axis 0 for static bucketing). Gathers each layer's
+  // host DRAM blocks from `src_offsets_major_dim` into pooled host bounce
+  // memory and issues one bulk DMA per shard (or bounded bounce chunk).
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dToPackedDeviceBuffer(
+      absl::Span<const raiden::RaidenBufferHandle> packed_shards,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      std::optional<int64_t> slot_idx = std::nullopt);
 
   // Per-layer device buffer holds bundled with the layer's on-device size.
   // For uniform models every layer has the same physical_size; for hybrid
@@ -971,7 +1001,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   std::shared_ptr<const PoolStagingLease> PoolStagingLeaseSnapshot(
       size_t storage_idx, uint64_t uuid) const;
 
+  struct HostBouncePool;
   HostBufferAllocator host_allocator_ = nullptr;
+  std::shared_ptr<HostBouncePool> bounce_pool_;
+  std::shared_ptr<HostBouncePool> EnsureBouncePool();
 
   absl::StatusOr<std::shared_ptr<const TransferPlan>> GetTransferPlan(
       uint64_t uuid) const;

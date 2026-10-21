@@ -171,6 +171,8 @@ class NumaAwareKVCacheManager {
   CompleteReadRaw();
 
   absl::Status UnlockBlocks(const std::vector<int>& block_ids);
+  absl::StatusOr<std::vector<int>> AllocateBlocks(int num_blocks);
+  absl::Status DeallocateBlocks(const std::vector<int>& block_ids);
 
   void RegisterKVBackends(absl::Span<const kv_cache::BackendConfig> configs) {
     for (auto& sub_manager : sub_managers_) {
@@ -197,6 +199,20 @@ class NumaAwareKVCacheManager {
       std::optional<int64_t> slot_idx = std::nullopt,
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
+
+#ifndef WITHOUT_PYTHON
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hFromPacked(
+      const nanobind::object& packed_array,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      bool unsafe_skip_buffer_lock = false);
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dToPacked(
+      const nanobind::object& packed_array,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      bool unsafe_skip_buffer_lock = false);
+#endif
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
@@ -465,6 +481,14 @@ class KVCacheManager {
     return numa_manager_->UnlockBlocks(block_ids);
   }
 
+  absl::StatusOr<std::vector<int>> AllocateBlocks(int num_blocks) {
+    return numa_manager_->AllocateBlocks(num_blocks);
+  }
+
+  absl::Status DeallocateBlocks(const std::vector<int>& block_ids) {
+    return numa_manager_->DeallocateBlocks(block_ids);
+  }
+
   std::string DumpMetricsToString() const {
     return numa_manager_->DumpMetricsToString();
   }
@@ -492,6 +516,28 @@ class KVCacheManager {
                               copy_sizes_major_dim, slot_idx, layer_idx,
                               shard_idx);
   }
+
+#ifndef WITHOUT_PYTHON
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hFromPacked(
+      const nanobind::object& packed_array,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      bool unsafe_skip_buffer_lock = false) {
+    return numa_manager_->D2hFromPacked(packed_array, dst_offsets_major_dim,
+                                        copy_sizes_major_dim,
+                                        unsafe_skip_buffer_lock);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dToPacked(
+      const nanobind::object& packed_array,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      bool unsafe_skip_buffer_lock = false) {
+    return numa_manager_->H2dToPacked(packed_array, src_offsets_major_dim,
+                                      copy_sizes_major_dim,
+                                      unsafe_skip_buffer_lock);
+  }
+#endif
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},

@@ -541,6 +541,66 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     self.assertTrue(done_prod, "Producer did not finish sending in time")
 
+  def test_hbm_staging_fragmented_d2h_and_h2d_with_donated_caches(self):
+    tpu_sharding = self.setup_shardings()
+    shape = (8, 128, 8, 8, 128)
+    key = jax.random.key(2026)
+
+    src_refs = []
+    caches = []
+    for i in range(self.num_layers):
+      sub_key = jax.random.fold_in(key, i)
+      dev_arr, host_ref = self._generate_random_cache(
+          sub_key, shape, jnp.bfloat16, tpu_sharding
+      )
+      caches.append(dev_arr)
+      src_refs.append(host_ref)
+    jax.block_until_ready(caches)
+
+    engine = KVCacheManager(
+        kv_caches=caches,
+        local_control_port=0,
+        host_blocks_to_allocate=8,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        enable_hbm_staging=True,
+    )
+
+    # Simulate engine step buffer donation invalidating initial `caches`.
+    donate_step = jax.jit(lambda xs: [x for x in xs], donate_argnums=(0,))
+    step_caches = donate_step(caches)
+    jax.block_until_ready(step_caches)
+
+    # Save 5 scattered HBM blocks via d2h_auto_allocate (non-power-of-two count)
+    # and reload into 5 scattered HBM destination blocks [7, 2, 5, 0, 4].
+    src_blocks = [7, 2, 5, 0, 3]
+    allocated_chunks, save_fut = engine.d2h_auto_allocate(
+        src_blocks, kv_caches=step_caches
+    )
+    save_fut.Await()
+
+    dst_caches = [
+        jax.device_put(jnp.zeros(shape, dtype=jnp.bfloat16), tpu_sharding)
+        for _ in range(self.num_layers)
+    ]
+    jax.block_until_ready(dst_caches)
+    dst_blocks = [6, 1, 4, 0, 5]
+    engine.h2d(allocated_chunks, dst_blocks, kv_caches=dst_caches).Await()
+    step2_caches = donate_step(engine.kv_caches)
+    jax.block_until_ready(step2_caches)
+    engine.h2d(allocated_chunks, dst_blocks, kv_caches=step2_caches).Await()
+
+    untouched = sorted(set(range(8)) - set(dst_blocks))
+    for layer_idx in range(self.num_layers):
+      actual = np.asarray(engine.kv_caches[layer_idx])
+      for dst_blk, orig_blk in zip(dst_blocks, src_blocks):
+        np.testing.assert_array_equal(
+            actual[dst_blk], src_refs[layer_idx][orig_blk]
+        )
+      for blk in untouched:
+        np.testing.assert_array_equal(actual[blk], 0)
+
+    engine.unlock_blocks(allocated_chunks)
+
 
 if __name__ == "__main__":
   absltest.main()
