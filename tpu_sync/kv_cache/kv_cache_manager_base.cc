@@ -733,7 +733,6 @@ size_t ResolveNumStagingLayers(size_t num_layers,
   }
   return requested;
 }
-
 // Rejects an all-layer dispatch (|target_layer_idx| unset) when fewer host
 // layer buffers than device layers are allocated: an all-layer dispatch maps
 // each layer to its own host buffer index and has no leased |host_layer_idx|.
@@ -1087,6 +1086,16 @@ KVCacheManagerBase::~KVCacheManagerBase() {
   push_pool_.reset();
   dma_pool_.reset();
   pull_pool_.reset();
+  {
+    // Drain and destroy secondary backends (e.g. TdsKVBackend::poller_thread_)
+    // outside `backends_mu_` BEFORE `buffer_holds_.clear()` unpins device HBM.
+    absl::flat_hash_map<std::string, std::shared_ptr<backends::KVBackend>>
+        backends_to_destroy;
+    {
+      absl::MutexLock lock(backends_mu_);
+      backends_to_destroy = std::move(backends_);
+    }
+  }
   buffer_holds_.clear();
   layers_ = StagingArena();
   host_block_manager_.reset();
@@ -3511,8 +3520,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
       }
     }
   } else {
-    // When fewer host layer buffers exist than layers, a transfer's layer
-    // lives in the buffer its session leased to that layer.
+    // When fewer host layer buffers exist than layers, a receiving transfer's
+    // layer lives in the buffer its session leased to that layer.
     size_t host_layer_idx = layer_idx;
     if (layers_.size() < num_layers_) {
       if (uuid == 0 || session == nullptr) {
@@ -4083,6 +4092,37 @@ KVCacheManagerBase::ResolveBlockSlices(int staging_block_id) const {
     }
   }
   return slices;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::WriteDeviceToBackend(
+    absl::Span<const std::shared_ptr<backends::KVBackend>> backends,
+    const std::vector<backends::BlockKey>& block_keys,
+    const std::vector<int64_t>& src_device_block_ids) {
+  if (backends.size() > 1) {
+    return absl::InvalidArgumentError(
+        "Multiple secondary backends not supported yet");
+  }
+  auto backend = backends.empty() ? nullptr : backends.front();
+  if (backend == nullptr) {
+    return absl::InvalidArgumentError("Secondary backend is null");
+  }
+  return absl::UnimplementedError("WriteDeviceToBackend is not supported");
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture>
+KVCacheManagerBase::ReadDeviceFromBackend(
+    absl::Span<const std::shared_ptr<backends::KVBackend>> backends,
+    const std::vector<backends::BlockKey>& block_keys,
+    const std::vector<int64_t>& dst_device_block_ids) {
+  if (backends.size() > 1) {
+    return absl::InvalidArgumentError(
+        "Multiple secondary backends not supported yet");
+  }
+  auto backend = backends.empty() ? nullptr : backends.front();
+  if (backend == nullptr) {
+    return absl::InvalidArgumentError("Secondary backend is null");
+  }
+  return absl::UnimplementedError("ReadDeviceFromBackend is not supported");
 }
 
 xla::PjRtClient* KVCacheManagerBase::GetPjRtClient() const {

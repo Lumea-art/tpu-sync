@@ -160,6 +160,16 @@ inline int64_t GetMajorSliceByteSize(const xla::Shape& shape,
   return physical_size / major;
 }
 
+// Location of an on-device buffer inside a Linux dma-buf exported by PJRT
+// (`PJRT_ExternalDmaAccess` / `xla::PjRtRawBufferInterface::ExternalDmaInfo`).
+// `offset` is measured in bytes from the start of `dma_buf_fd`, and `size` is
+// the byte size of this buffer's device allocation.
+struct ExternalDmaInfo {
+  int dma_buf_fd = -1;
+  size_t offset = 0;
+  size_t size = 0;
+};
+
 struct RaidenBufferHandle {
   xla::PjRtBuffer* buffer =
       nullptr;  // ABSL_DEPRECATED("Use shape/device or raw handles instead")
@@ -317,6 +327,13 @@ struct RaidenBufferHandle {
     if (err) return PjrtErrorToStatusLocal(c_hold->c_api, err);
     return args.event;
   }
+
+  // Queries PJRT (`PJRT_RawBuffer::vtable->acquire_external_dma_access`) for
+  // this buffer's Linux dma-buf location and pins its HBM range against
+  // compaction until the returned `shared_ptr` is destroyed. Returns
+  // `UnimplementedError` when external DMA is unsupported.
+  absl::StatusOr<std::shared_ptr<const ExternalDmaInfo>>
+  AcquireExternalDmaAccess() const;
 };
 
 using BufferHoldAndAlias = RaidenBufferHandle;

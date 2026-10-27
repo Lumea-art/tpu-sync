@@ -313,6 +313,28 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<int64_t>& src_host_block_ids,
       const std::vector<int64_t>& dst_device_block_ids);
 
+  // Writes local TPU HBM blocks directly to a TDS secondary backend without
+  // host DRAM staging buffers (the HBM <-> storage counterpart of
+  // D2hWriteToBackend). `backends` must hold exactly one TdsKVBackend; a null,
+  // non-TDS, or second backend is InvalidArgument. Block i is written to
+  // block_keys[i] from device block src_device_block_ids[i] as the L * S HBM
+  // slices resolved by ResolveDeviceBlockSlices (FailedPrecondition if a
+  // block cannot be resolved). The returned future settles once every block's
+  // write has completed, with the first failure if any.
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> WriteDeviceToBackend(
+      absl::Span<const std::shared_ptr<backends::KVBackend>> backends,
+      const std::vector<backends::BlockKey>& block_keys,
+      const std::vector<int64_t>& src_device_block_ids);
+
+  // Reads blocks from a TDS secondary backend directly into local TPU HBM
+  // without host DRAM staging buffers (the counterpart of H2dReadFromBackend).
+  // Same backend and sizing contract as WriteDeviceToBackend; block i is read
+  // from block_keys[i] into device block dst_device_block_ids[i].
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> ReadDeviceFromBackend(
+      absl::Span<const std::shared_ptr<backends::KVBackend>> backends,
+      const std::vector<backends::BlockKey>& block_keys,
+      const std::vector<int64_t>& dst_device_block_ids);
+
   // Resolves the L * S disjoint memory slices for a given staging block slot.
   // Symmetrically used for:
   //   1. Offload: source slices to gather-write from host DRAM -> secondary
@@ -744,6 +766,11 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // (HMA) models sizes may differ (e.g. mamba conv_state bf16 vs ssm f32).
   struct LayerDeviceInfo {
     std::vector<raiden::BufferHoldAndAlias> holds;
+    // Per-shard PJRT external DMA handles populated once at backend startup
+    // (`RegisterDeviceBuffersWithTds`) and read lock-free during transfers.
+    // Empty unless every buffer succeeded startup BAR2 registration.
+    std::vector<std::shared_ptr<const raiden::ExternalDmaInfo>>
+        external_dma_infos;
     // Total on-device bytes for this layer's buffer.  Set by the
     // device-backed constructor from PjRtBuffer.  DMA functions use
     // this for per-layer offset and copy-size calculations.
