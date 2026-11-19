@@ -792,7 +792,7 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
       return absl::AlreadyExistsError(
           absl::StrCat("pool reshard recv UUID already active: ", plan.uuid()));
     }
-    if (!pending_pool_reshard_recvs_.insert(plan.uuid()).second) {
+    if (!pending_pool_reshard_recvs_.emplace(plan.uuid(), false).second) {
       return absl::AlreadyExistsError(
           absl::StrCat("pool reshard recv UUID already active: ", plan.uuid()));
     }
@@ -814,15 +814,49 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
       std::shared_ptr<TransferSession> recv_session,
       CreateReshardReceiveSession(base_.get(), staging_allocator_.get(), plan,
                                   chip_block_ids, DeadlineFromNow()));
+  bool cancelled = false;
   {
     absl::MutexLock lock(mu_);
-    pending_pool_reshard_recvs_.erase(plan.uuid());
-    sessions_[plan.uuid()] = SessionEntry{recv_session, plan.req_id(),
-                                          SessionRole::kPoolReshardReceive};
-    NoteSubPlanRegisteredLocked(plan.req_id(), recv_session,
-                                plan.sub_plan_index(), plan.sub_plan_count());
+    auto pending = pending_pool_reshard_recvs_.extract(plan.uuid());
+    cancelled = !pending.empty() && pending.mapped();
+    if (!cancelled) {
+      sessions_[plan.uuid()] = SessionEntry{recv_session, plan.req_id(),
+                                            SessionRole::kPoolReshardReceive};
+      NoteSubPlanRegisteredLocked(plan.req_id(), recv_session,
+                                  plan.sub_plan_index(),
+                                  plan.sub_plan_count());
+    }
+  }
+  if (cancelled) {
+    // Cancelled while it was being prepared: drop it and free its staging.
+    absl::Status status = absl::CancelledError(
+        "pool reshard receive cancelled while it was being prepared");
+    recv_session->Finish(status);
+    return status;
   }
   return recv_session->Start();
+}
+
+bool KVCacheManagerWithTransfer::CancelPoolReshardRecv(uint64_t uuid) {
+  std::shared_ptr<TransferSession> session;
+  {
+    absl::MutexLock lock(mu_);
+    if (auto pending = pending_pool_reshard_recvs_.find(uuid);
+        pending != pending_pool_reshard_recvs_.end()) {
+      // Still being prepared: PoolReshardRegisterRecv will drop it.
+      pending->second = true;
+      return true;
+    }
+    auto it = sessions_.find(uuid);
+    if (it == sessions_.end() ||
+        it->second.role != SessionRole::kPoolReshardReceive) {
+      return true;
+    }
+    session = it->second.session;
+  }
+  session->Finish(absl::CancelledError(
+      "pool reshard receive cancelled by the coordinator"));
+  return session->Done();
 }
 
 absl::Status KVCacheManagerWithTransfer::UnregisterActivePlan(uint64_t uuid) {
